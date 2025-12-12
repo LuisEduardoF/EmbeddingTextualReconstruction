@@ -20,8 +20,8 @@ class EmbeddingInverter(nn.Module):
         self,
         embedding_dim: int = 768,
         vocab_size: int = 30000,
-        hidden_dims: list = [1024, 2048, 1024],
-        max_seq_length: int = 128,
+        hidden_dims: list = [512, 512],
+        max_seq_length: int = 64,
         dropout: float = 0.3
     ):
         """

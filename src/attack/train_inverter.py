@@ -135,7 +135,7 @@ class InverterTrainer:
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             embeddings = batch['embedding'].to(self.device)
             target_ids = batch['token_ids'].to(self.device)
             
@@ -156,20 +156,28 @@ class InverterTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             
-            # Calculate accuracy
-            predictions = torch.argmax(logits, dim=-1)
-            mask = target_ids != self.tokenizer.pad_token_id
-            correct = (predictions == target_ids) & mask
-            correct_tokens += correct.sum().item()
-            total_tokens += mask.sum().item()
+            # Calculate accuracy (detach to save memory)
+            with torch.no_grad():
+                predictions = torch.argmax(logits, dim=-1)
+                mask = target_ids != self.tokenizer.pad_token_id
+                correct = (predictions == target_ids) & mask
+                correct_tokens += correct.sum().item()
+                total_tokens += mask.sum().item()
             
             total_loss += loss.item()
+            
+            # Clear cache periodically to prevent memory buildup
+            if batch_idx % 10 == 0:
+                torch.cuda.empty_cache()
             
             # Update progress bar
             pbar.set_postfix({
                 'loss': loss.item(),
                 'acc': correct_tokens / total_tokens if total_tokens > 0 else 0
             })
+            
+            # Delete tensors to free memory
+            del embeddings, target_ids, logits, loss, predictions, mask, correct
         
         avg_loss = total_loss / len(train_loader)
         accuracy = correct_tokens / total_tokens if total_tokens > 0 else 0
@@ -299,10 +307,10 @@ def main():
     EMBEDDING_PATH_TRAIN = "data/embeddings/train_embeddings.pkl"
     EMBEDDING_PATH_TEST = "data/embeddings/test_embeddings.pkl"
     MODEL_TYPE = "mlp"  # Options: 'mlp', 'lstm', 'attention'
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16  # Reduced for memory efficiency
     NUM_EPOCHS = 20
     LEARNING_RATE = 1e-4
-    MAX_LENGTH = 128
+    MAX_LENGTH = 64  # Reduced for memory efficiency
     
     print("Loading embeddings...")
     with open(EMBEDDING_PATH_TRAIN, 'rb') as f:
@@ -339,19 +347,26 @@ def main():
         max_length=MAX_LENGTH
     )
     
-    # Create data loaders
+    # Clear memory
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    # Create data loaders (num_workers=0 to reduce memory overhead)
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=2
+        num_workers=0,
+        pin_memory=True
     )
     
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=2
+        num_workers=0,
+        pin_memory=True
     )
     
     # Create model
