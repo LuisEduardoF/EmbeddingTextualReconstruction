@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Data files
+*.parquet
+*.gzip
+*.pkl
+*.pickle
+*.csv
+*.json
+data/raw/*
+data/processed/*
+data/embeddings/*
+
+# Model files
+models/bertimbau/*
+models/attacker/*
+*.pt
+*.pth
+*.h5
+*.ckpt
+
+# Results
+results/*
+*.png
+*.jpg
+*.pdf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Keep directory structure
+!data/.gitkeep
+!models/.gitkeep
+!results/.gitkeep
+!notebooks/.gitkeep
