@@ -16,7 +16,7 @@ from tqdm import tqdm
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from attack.inverter_model import EmbeddingInverter, LSTMInverter, AttentionInverter
+from attack.inverter_model import EmbeddingInverter, LSTMInverter, AttentionInverter, CategoricalLSTMInverter
 from evaluation.metrics import InversionMetrics
 
 
@@ -35,12 +35,13 @@ class AttackEvaluator:
         
         Args:
             model_path: Path to trained model
-            model_type: Type of model ('mlp', 'lstm', 'attention')
+            model_type: Type of model ('mlp', 'lstm', 'attention', 'categorical_lstm')
             tokenizer_name: Name of tokenizer
             device: Device to use
         """
         self.model_type = model_type
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.is_categorical = (model_type == 'categorical_lstm')
         
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -59,19 +60,26 @@ class AttackEvaluator:
             self.model = EmbeddingInverter(
                 embedding_dim=embedding_dim,
                 vocab_size=vocab_size,
-                max_seq_length=128
+                max_seq_length=64
             )
         elif model_type == 'lstm':
             self.model = LSTMInverter(
                 embedding_dim=embedding_dim,
                 vocab_size=vocab_size,
-                max_seq_length=128
+                max_seq_length=64
             )
         elif model_type == 'attention':
             self.model = AttentionInverter(
                 embedding_dim=embedding_dim,
                 vocab_size=vocab_size,
-                max_seq_length=128
+                max_seq_length=64
+            )
+        elif model_type == 'categorical_lstm':
+            self.model = CategoricalLSTMInverter(
+                num_categories=3,  # ASSUNTOS, CLASSE PROCESSUAL, RAMO DE ATIVIDADE
+                embedding_dim=embedding_dim,
+                vocab_size=vocab_size,
+                max_seq_length=64
             )
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -106,7 +114,13 @@ class AttackEvaluator:
                 ).to(self.device)
                 
                 # Get predictions
-                logits = self.model(batch_embeddings)
+                if self.is_categorical:
+                    # Generate random category IDs for categorical model
+                    batch_size_actual = batch_embeddings.size(0)
+                    category_ids = torch.randint(0, 3, (batch_size_actual,)).to(self.device)
+                    logits = self.model(batch_embeddings, category_ids)
+                else:
+                    logits = self.model(batch_embeddings)
                 predicted_ids = torch.argmax(logits, dim=-1)
                 
                 # Decode to text
@@ -205,13 +219,14 @@ class AttackEvaluator:
         with open(examples_path, 'w', encoding='utf-8') as f:
             f.write("="*80 + "\n")
             f.write("EMBEDDING INVERSION ATTACK - RECONSTRUCTION EXAMPLES\n")
+            f.write(f"Model Type: {results['model_type'].upper()}\n")
             f.write("="*80 + "\n\n")
             
             for i, example in enumerate(results['examples'], 1):
                 f.write(f"Example {i}:\n")
                 f.write("-" * 80 + "\n")
                 f.write(f"ORIGINAL:\n{example['original']}\n\n")
-                f.write(f"RECONSTRUCTED:\n{example['reconstructed']}\n")
+                f.write(f"RECONSTRUCTED ({results['model_type'].upper()}):\n{example['reconstructed']}\n")
                 f.write("="*80 + "\n\n")
         
         print(f"✓ Saved examples to {examples_path}")
@@ -394,38 +409,184 @@ class AttackEvaluator:
         print(f"✓ Saved report to {report_path}")
 
 
+def evaluate_all_models(
+    embeddings_path: str,
+    output_dir: str = "results",
+    num_samples: int = None,
+    num_examples: int = 5
+):
+    """
+    Evaluate all three model types and generate a combined report with examples from each.
+    
+    Args:
+        embeddings_path: Path to embeddings file
+        output_dir: Directory to save results
+        num_samples: Number of samples to evaluate
+        num_examples: Number of examples to include from each model
+    """
+    model_configs = [
+        ("models/attacker/mlp/best_inverter.pt", "mlp"),
+        ("models/attacker/lstm/best_inverter.pt", "lstm"),
+        ("models/attacker/attention/best_inverter.pt", "attention"),
+        ("models/attacker/categorical_lstm/best_inverter.pt", "categorical_lstm")
+    ]
+    
+    all_results = {}
+    combined_examples = []
+    
+    print("="*80)
+    print("EMBEDDING INVERSION ATTACK EVALUATION - ALL MODELS")
+    print("="*80 + "\n")
+    
+    for model_path, model_type in model_configs:
+        print(f"\n{'='*80}")
+        print(f"Evaluating {model_type.upper()} Model")
+        print(f"{'='*80}")
+        
+        try:
+            # Create evaluator
+            evaluator = AttackEvaluator(
+                model_path=model_path,
+                model_type=model_type
+            )
+            
+            # Evaluate
+            results = evaluator.evaluate_on_dataset(
+                embeddings_path=embeddings_path,
+                num_samples=num_samples
+            )
+            
+            # Store results
+            all_results[model_type] = results
+            
+            # Generate individual report
+            model_output_dir = os.path.join(output_dir, model_type)
+            evaluator.generate_report(results, output_dir=model_output_dir)
+            
+            # Collect examples
+            for i in range(min(num_examples, len(results['examples']))):
+                if len(combined_examples) <= i:
+                    combined_examples.append({
+                        'original': results['examples'][i]['original'],
+                        'reconstructions': {}
+                    })
+                combined_examples[i]['reconstructions'][model_type] = results['examples'][i]['reconstructed']
+            
+            print(f"\n✓ {model_type.upper()} evaluation complete")
+            
+        except FileNotFoundError:
+            print(f"⚠ Model not found: {model_path} - Skipping {model_type}")
+            continue
+        except Exception as e:
+            print(f"✗ Error evaluating {model_type}: {e}")
+            continue
+    
+    # Generate combined examples file
+    if combined_examples:
+        combined_examples_path = os.path.join(output_dir, 'reconstruction_examples_all_models.txt')
+        with open(combined_examples_path, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("EMBEDDING INVERSION ATTACK - RECONSTRUCTION EXAMPLES\n")
+            f.write("Comparison Across All Model Types\n")
+            f.write("="*80 + "\n\n")
+            
+            for i, example in enumerate(combined_examples, 1):
+                f.write(f"Example {i}:\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"ORIGINAL:\n{example['original']}\n\n")
+                
+                for model_type in ['mlp', 'lstm', 'attention', 'categorical_lstm']:
+                    if model_type in example['reconstructions']:
+                        f.write(f"RECONSTRUCTED ({model_type.upper()}):\n")
+                        f.write(f"{example['reconstructions'][model_type]}\n\n")
+                
+                f.write("="*80 + "\n\n")
+        
+        print(f"\n✓ Saved combined examples to {combined_examples_path}")
+    
+    # Generate comparison report
+    if len(all_results) > 1:
+        _generate_comparison_report(all_results, output_dir)
+    
+    return all_results
+
+
+def _generate_comparison_report(all_results: Dict, output_dir: str):
+    """Generate a comparison report across all models."""
+    report_path = os.path.join(output_dir, 'MODEL_COMPARISON.md')
+    
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("# Comparação entre Modelos de Inversão\n\n")
+        f.write("## 📊 Resumo Comparativo\n\n")
+        
+        # Comparison table
+        f.write("| Métrica | MLP | LSTM | Attention | Categorical LSTM |\n")
+        f.write("|---------|-----|------|-----------|------------------|\n")
+        
+        metric_names = [
+            ('bleu1', 'BLEU-1'),
+            ('bleu4', 'BLEU-4'),
+            ('rouge1_f', 'ROUGE-1'),
+            ('rougeL_f', 'ROUGE-L'),
+            ('similarity', 'Similarity'),
+            ('keyword_f1', 'Keyword F1'),
+            ('overall_leakage_rate', 'Leakage Rate')
+        ]
+        
+        for metric_key, metric_label in metric_names:
+            row = f"| {metric_label} |"
+            for model_type in ['mlp', 'lstm', 'attention', 'categorical_lstm']:
+                if model_type in all_results:
+                    value = all_results[model_type]['metrics'].get(metric_key, 0)
+                    row += f" {value:.4f} |"
+                else:
+                    row += " N/A |"
+            f.write(row + "\n")
+        
+        f.write("\n## 🏆 Melhor Modelo por Métrica\n\n")
+        
+        for metric_key, metric_label in metric_names:
+            best_model = None
+            best_score = -1
+            
+            for model_type in ['mlp', 'lstm', 'attention', 'categorical_lstm']:
+                if model_type in all_results:
+                    score = all_results[model_type]['metrics'].get(metric_key, 0)
+                    if score > best_score:
+                        best_score = score
+                        best_model = model_type
+            
+            if best_model:
+                f.write(f"- **{metric_label}**: {best_model.upper()} ({best_score:.4f})\n")
+        
+        f.write("\n## 💡 Conclusão\n\n")
+        f.write("A comparação entre os modelos permite avaliar qual arquitetura é mais eficaz ")
+        f.write("para ataques de inversão de embeddings, ajudando a identificar os maiores ")
+        f.write("riscos de privacidade.\n")
+    
+    print(f"✓ Saved comparison report to {report_path}")
+
+
 def main():
     """Main evaluation function."""
     
     # Configuration
-    MODEL_PATH = "models/attacker/mlp/best_inverter.pt"
-    MODEL_TYPE = "mlp"
     EMBEDDINGS_PATH = "data/embeddings/test_embeddings.pkl"
     OUTPUT_DIR = "results"
     NUM_SAMPLES = None  # Evaluate all samples
+    NUM_EXAMPLES = 5  # Number of examples from each model
     
-    print("="*60)
-    print("EMBEDDING INVERSION ATTACK EVALUATION")
-    print("="*60)
-    
-    # Create evaluator
-    evaluator = AttackEvaluator(
-        model_path=MODEL_PATH,
-        model_type=MODEL_TYPE
-    )
-    
-    # Evaluate
-    results = evaluator.evaluate_on_dataset(
+    # Evaluate all models
+    evaluate_all_models(
         embeddings_path=EMBEDDINGS_PATH,
-        num_samples=NUM_SAMPLES
+        output_dir=OUTPUT_DIR,
+        num_samples=NUM_SAMPLES,
+        num_examples=NUM_EXAMPLES
     )
     
-    # Generate report
-    evaluator.generate_report(results, output_dir=OUTPUT_DIR)
-    
-    print("\n" + "="*60)
+    print("\n" + "="*80)
     print("EVALUATION COMPLETE!")
-    print("="*60)
+    print("="*80)
 
 
 if __name__ == "__main__":

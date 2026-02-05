@@ -25,7 +25,7 @@ def setup_experiment(args):
     print(f"\nExperiment started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Data path: {args.data_path}")
     print(f"Max samples: {args.max_samples}")
-    print(f"Model type: {args.model_type}")
+    print(f"Model types: MLP, LSTM, Attention, Categorical LSTM (all models)")
     print(f"Batch size: {args.batch_size}")
     print(f"Epochs: {args.epochs}")
     print("="*80 + "\n")
@@ -34,6 +34,11 @@ def setup_experiment(args):
     os.makedirs('data/embeddings', exist_ok=True)
     os.makedirs('models/attacker', exist_ok=True)
     os.makedirs('results', exist_ok=True)
+    
+    # Create subdirectories for each model
+    for model_type in ['mlp', 'lstm', 'attention', 'categorical_lstm']:
+        os.makedirs(f'models/attacker/{model_type}', exist_ok=True)
+        os.makedirs(f'results/{model_type}', exist_ok=True)
 
 
 def step1_generate_embeddings(args):
@@ -57,68 +62,93 @@ def step1_generate_embeddings(args):
 
 
 def step2_train_inverter(args):
-    """Step 2: Train the inverter model."""
+    """Step 2: Train all inverter models (MLP, LSTM, Attention)."""
     print("\n" + "="*80)
-    print("STEP 2: TRAINING INVERTER MODEL")
+    print("STEP 2: TRAINING ALL INVERTER MODELS")
     print("="*80 + "\n")
     
-    model_path = f'models/attacker/{args.model_type}/best_inverter.pt'
-    if os.path.exists(model_path) and not args.force:
-        print(f"✓ Model already exists at {model_path}. Use --force to retrain.")
+    model_types = ['mlp', 'lstm', 'attention', 'categorical_lstm']
+    
+    # Check if all models exist
+    all_exist = all(os.path.exists(f'models/attacker/{mt}/best_inverter.pt') for mt in model_types)
+    
+    if all_exist and not args.force:
+        print("✓ All models already exist. Use --force to retrain.")
+        for mt in model_types:
+            print(f"  - models/attacker/{mt}/best_inverter.pt")
         return
     
-    # Import and run training
+    # Import and run training (trains all models)
     from attack.train_inverter import main as train_main
     
-    # Temporarily modify sys.argv for the training script
-    original_argv = sys.argv
-    sys.argv = [
-        'train_inverter.py',
-        '--model_type', args.model_type,
-        '--batch_size', str(args.batch_size),
-        '--epochs', str(args.epochs),
-        '--learning_rate', str(args.learning_rate)
-    ]
+    print("Training all four models: MLP, LSTM, Attention, and Categorical LSTM")
+    print("This will train each model sequentially...\n")
     
     try:
         train_main()
-    finally:
-        sys.argv = original_argv
+    except Exception as e:
+        print(f"\n✗ Training failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
     print("\n✓ Step 2 completed successfully!")
+    print("✓ All models trained:")
+    for mt in model_types:
+        if os.path.exists(f'models/attacker/{mt}/best_inverter.pt'):
+            print(f"  ✓ {mt.upper()}: models/attacker/{mt}/best_inverter.pt")
 
 
 def step3_evaluate_attack(args):
-    """Step 3: Evaluate the attack and generate report."""
+    """Step 3: Evaluate all attack models and generate comparison reports."""
     print("\n" + "="*80)
-    print("STEP 3: EVALUATING ATTACK")
+    print("STEP 3: EVALUATING ALL ATTACK MODELS")
     print("="*80 + "\n")
     
-    from evaluation.evaluate_attack import AttackEvaluator
+    from evaluation.evaluate_attack import evaluate_all_models
     
-    model_path = f'models/attacker/{args.model_type}/best_inverter.pt'
+    # Check if embeddings exist
+    if not os.path.exists('data/embeddings/test_embeddings.pkl'):
+        print("✗ Test embeddings not found")
+        print("Please run step 1 first to generate embeddings")
+        return
     
-    if not os.path.exists(model_path):
-        print(f"✗ Model not found at {model_path}")
+    # Check which models exist
+    model_types = ['mlp', 'lstm', 'attention', 'categorical_lstm']
+    existing_models = [mt for mt in model_types if os.path.exists(f'models/attacker/{mt}/best_inverter.pt')]
+    
+    if not existing_models:
+        print("✗ No trained models found")
         print("Please run training first (step 2)")
         return
     
-    # Create evaluator
-    evaluator = AttackEvaluator(
-        model_path=model_path,
-        model_type=args.model_type
-    )
+    print(f"Found {len(existing_models)} trained model(s): {', '.join([m.upper() for m in existing_models])}")
+    print("Evaluating all models and generating comparison reports...\n")
     
-    # Evaluate
-    results = evaluator.evaluate_on_dataset(
-        embeddings_path='data/embeddings/test_embeddings.pkl',
-        num_samples=args.eval_samples
-    )
-    
-    # Generate report
-    evaluator.generate_report(results, output_dir='results')
-    
-    print("\n✓ Step 3 completed successfully!")
+    try:
+        # Evaluate all models
+        all_results = evaluate_all_models(
+            embeddings_path='data/embeddings/test_embeddings.pkl',
+            output_dir='results',
+            num_samples=args.eval_samples,
+            num_examples=5
+        )
+        
+        print("\n✓ Step 3 completed successfully!")
+        print("✓ Generated reports:")
+        for mt in existing_models:
+            print(f"  - results/{mt}/ATTACK_REPORT.md")
+            print(f"  - results/{mt}/attack_metrics.json")
+            print(f"  - results/{mt}/reconstruction_examples.txt")
+        if len(existing_models) > 1:
+            print(f"  - results/reconstruction_examples_all_models.txt")
+            print(f"  - results/MODEL_COMPARISON.md")
+            
+    except Exception as e:
+        print(f"\n✗ Evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def main():
@@ -141,16 +171,7 @@ def main():
         help='Maximum number of samples to use (None for all)'
     )
     
-    # Model arguments
-    parser.add_argument(
-        '--model_type',
-        type=str,
-        default='mlp',
-        choices=['mlp', 'lstm', 'attention'],
-        help='Type of inverter model'
-    )
-    
-    # Training arguments
+    # Training arguments (removed --model_type since we train all models)
     parser.add_argument(
         '--batch_size',
         type=int,
@@ -160,7 +181,7 @@ def main():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=20,
+        default=100,
         help='Number of training epochs'
     )
     parser.add_argument(
@@ -216,13 +237,27 @@ def main():
         print("="*80)
         print(f"\nCompleted at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("\nGenerated files:")
+        print("\nData:")
         print("  - data/embeddings/train_embeddings.pkl")
         print("  - data/embeddings/test_embeddings.pkl")
-        print(f"  - models/attacker/{args.model_type}/best_inverter.pt")
-        print("  - results/attack_metrics.json")
-        print("  - results/ATTACK_REPORT.md")
-        print("  - results/reconstruction_examples.txt")
-        print("  - results/plots/*.png")
+        print("\nTrained Models:")
+        for model_type in ['mlp', 'lstm', 'attention', 'categorical_lstm']:
+            model_path = f"models/attacker/{model_type}/best_inverter.pt"
+            if os.path.exists(model_path):
+                print(f"  ✓ {model_type.upper()}: {model_path}")
+        print("\nEvaluation Results:")
+        print("  - results/training_summary.txt")
+        if os.path.exists('results/reconstruction_examples_all_models.txt'):
+            print("  - results/reconstruction_examples_all_models.txt")
+        if os.path.exists('results/MODEL_COMPARISON.md'):
+            print("  - results/MODEL_COMPARISON.md")
+        print("\nIndividual Model Reports:")
+        for model_type in ['mlp', 'lstm', 'attention', 'categorical_lstm']:
+            if os.path.exists(f'results/{model_type}/ATTACK_REPORT.md'):
+                print(f"  - results/{model_type}/ATTACK_REPORT.md")
+                print(f"  - results/{model_type}/attack_metrics.json")
+                print(f"  - results/{model_type}/reconstruction_examples.txt")
+                print(f"  - results/{model_type}/plots/*.png")
         print("\n" + "="*80)
         
     except Exception as e:

@@ -324,6 +324,136 @@ class AttentionInverter(nn.Module):
         
         return logits
 
+class CategoricalLSTMInverter(nn.Module):
+    """
+    Conditional LSTM Inverter that reconstructs text using both 
+    BERT embeddings and a Category label.
+    """
+    
+    def __init__(
+        self,
+        num_categories: int,
+        embedding_dim: int = 768,
+        vocab_size: int = 30000,
+        category_dim: int = 64,  # Dimension for the category embedding
+        hidden_dim: int = 512,
+        num_layers: int = 2,
+        max_seq_length: int = 128,
+        dropout: float = 0.3
+    ):
+        """
+        Initialize Categorical Inverter.
+        
+        Args:
+            num_categories: Total number of unique categories in your dataset
+            embedding_dim: Dimension of input BERT embeddings
+            vocab_size: Size of vocabulary
+            category_dim: Size of the vector representing the category
+            hidden_dim: LSTM hidden dimension
+            num_layers: Number of LSTM layers
+            max_seq_length: Maximum sequence length
+            dropout: Dropout rate
+        """
+        super(CategoricalLSTMInverter, self).__init__()
+        
+        self.embedding_dim = embedding_dim
+        self.num_categories = num_categories
+        self.vocab_size = vocab_size
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.max_seq_length = max_seq_length
+        
+        # 1. Category Embedding Layer
+        # Learns a dense vector representation for each category ID
+        self.category_embedding = nn.Embedding(num_categories, category_dim)
+        
+        # 2. Fusion / Projection Layer
+        # We project (BERT Embedding + Category Embedding) --> Hidden State
+        combined_dim = embedding_dim + category_dim
+        self.embedding_projection = nn.Linear(combined_dim, hidden_dim * num_layers * 2)
+        
+        # 3. LSTM Decoder
+        self.lstm = nn.LSTM(
+            input_size=vocab_size,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0,
+            batch_first=True
+        )
+        
+        # 4. Output Projection
+        self.output_projection = nn.Linear(hidden_dim, vocab_size)
+        
+    def init_hidden(self, embeddings: torch.Tensor, category_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Initialize LSTM hidden state by fusing BERT embedding and Category embedding.
+        """
+        batch_size = embeddings.size(0)
+        
+        # Get category vectors: [batch_size, category_dim]
+        cat_vecs = self.category_embedding(category_ids)
+        
+        # Concatenate BERT embedding with Category embedding
+        # Result: [batch_size, embedding_dim + category_dim]
+        combined_input = torch.cat([embeddings, cat_vecs], dim=1)
+        
+        # Project combined vector to hidden state dimensions
+        projected = self.embedding_projection(combined_input)
+        projected = projected.view(batch_size, self.num_layers, 2, self.hidden_dim)
+        
+        # Split into hidden state (h0) and cell state (c0)
+        h0 = projected[:, :, 0, :].transpose(0, 1).contiguous()
+        c0 = projected[:, :, 1, :].transpose(0, 1).contiguous()
+        
+        return h0, c0
+    
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        category_ids: torch.Tensor,
+        target_tokens: Optional[torch.Tensor] = None,
+        teacher_forcing_ratio: float = 0.5
+    ) -> torch.Tensor:
+        """
+        Forward pass with category conditioning.
+        
+        Args:
+            embeddings: Input BERT embeddings [batch_size, embedding_dim]
+            category_ids: Category indices [batch_size]
+            target_tokens: Target token IDs (for training)
+            teacher_forcing_ratio: Probability of using teacher forcing
+        """
+        batch_size = embeddings.size(0)
+        device = embeddings.device
+        
+        # Initialize hidden state using BOTH embedding and category
+        h, c = self.init_hidden(embeddings, category_ids)
+        
+        # Start token (assuming 0 is start/padding)
+        input_token = torch.zeros(batch_size, 1, self.vocab_size).to(device)
+        
+        outputs = []
+        
+        for t in range(self.max_seq_length):
+            # LSTM step
+            lstm_out, (h, c) = self.lstm(input_token, (h, c))
+            
+            # Project to vocabulary
+            logits = self.output_projection(lstm_out.squeeze(1))
+            outputs.append(logits)
+            
+            # Decide next input (Teacher Forcing vs Autoregressive)
+            if target_tokens is not None and np.random.random() < teacher_forcing_ratio:
+                if t < target_tokens.size(1) - 1:
+                    next_token_id = target_tokens[:, t + 1]
+                    input_token = F.one_hot(next_token_id, self.vocab_size).float().unsqueeze(1)
+                else:
+                    input_token = torch.zeros(batch_size, 1, self.vocab_size).to(device)
+            else:
+                predicted_id = torch.argmax(logits, dim=-1)
+                input_token = F.one_hot(predicted_id, self.vocab_size).float().unsqueeze(1)
+        
+        return torch.stack(outputs, dim=1)
 
 if __name__ == "__main__":
     # Test the models
@@ -331,6 +461,7 @@ if __name__ == "__main__":
     embedding_dim = 768
     vocab_size = 30000
     max_seq_length = 128
+    num_categories = 3  # ["ASSUNTOS", "CLASSE PROCESSUAL", "RAMO DE ATIVIDADE"] (MAGISTRADO is not categorical)
     
     # Create dummy embeddings
     embeddings = torch.randn(batch_size, embedding_dim)
@@ -349,5 +480,12 @@ if __name__ == "__main__":
     model3 = AttentionInverter(embedding_dim, vocab_size, max_seq_length=max_seq_length)
     output3 = model3(embeddings)
     print(f"Output shape: {output3.shape}")
+    
+    print("\nTesting CategoricalLSTMInverter...")
+    # Create dummy category IDs
+    category_ids = torch.randint(0, num_categories, (batch_size,))
+    model4 = CategoricalLSTMInverter(num_categories=num_categories,embedding_dim=embedding_dim,vocab_size=vocab_size,category_dim=64,max_seq_length=max_seq_length)
+    output4 = model4(embeddings, category_ids)
+    print(f"Output shape: {output4.shape}")
     
     print("\nAll models working correctly!")

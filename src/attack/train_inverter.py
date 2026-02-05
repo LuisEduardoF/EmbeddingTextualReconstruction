@@ -13,7 +13,7 @@ import pickle
 import os
 from transformers import AutoTokenizer
 
-from .inverter_model import EmbeddingInverter, LSTMInverter, AttentionInverter
+from .inverter_model import EmbeddingInverter, LSTMInverter, AttentionInverter, CategoricalLSTMInverter
 
 
 class EmbeddingInversionDataset(Dataset):
@@ -24,7 +24,8 @@ class EmbeddingInversionDataset(Dataset):
         embeddings: np.ndarray,
         texts: List[str],
         tokenizer,
-        max_length: int = 128
+        max_length: int = 128,
+        use_categories: bool = False
     ):
         """
         Initialize dataset.
@@ -34,19 +35,72 @@ class EmbeddingInversionDataset(Dataset):
             texts: Original texts
             tokenizer: Tokenizer for encoding texts
             max_length: Maximum sequence length
+            use_categories: If True, split texts into category segments
         """
-        self.embeddings = torch.FloatTensor(embeddings)
-        self.texts = texts
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.use_categories = use_categories
+        
+        if use_categories:
+            # Expand dataset: 1 sample → 3 samples (one per category)
+            self._create_categorical_dataset(embeddings, texts)
+        else:
+            # Standard dataset
+            self.embeddings = torch.FloatTensor(embeddings)
+            self.texts = texts
+            self.category_ids = None
+            
+            # Pre-tokenize all texts
+            print("Tokenizing texts...")
+            self.tokenized = []
+            for text in tqdm(texts):
+                encoded = tokenizer.encode(
+                    text,
+                    max_length=max_length,
+                    padding='max_length',
+                    truncation=True,
+                    return_tensors='pt'
+                )
+                self.tokenized.append(encoded.squeeze(0))
+    
+    def _create_categorical_dataset(self, embeddings: np.ndarray, texts: List[str]):
+        """Create expanded dataset with category segments."""
+        print("Creating categorical dataset (expanding samples)...")
+        
+        expanded_embeddings = []
+        expanded_texts = []
+        expanded_categories = []
+        
+        for i, (emb, text) in enumerate(tqdm(zip(embeddings, texts), total=len(embeddings))):
+            # Split text by ' | ' delimiter
+            segments = text.split(' | ')
+            
+            # We expect 4 segments, but use first 3 for categories
+            # (ASSUNTOS, CLASSE PROCESSUAL, RAMO DE ATIVIDADE)
+            num_segments = min(3, len(segments))
+            
+            for cat_id in range(num_segments):
+                if cat_id < len(segments):
+                    segment_text = segments[cat_id].strip()
+                    if segment_text:  # Only add non-empty segments
+                        expanded_embeddings.append(emb)
+                        expanded_texts.append(segment_text)
+                        expanded_categories.append(cat_id)
+        
+        self.embeddings = torch.FloatTensor(np.array(expanded_embeddings))
+        self.texts = expanded_texts
+        self.category_ids = torch.LongTensor(expanded_categories)
+        
+        print(f"Expanded from {len(embeddings)} to {len(self.embeddings)} samples")
+        print(f"Category distribution: {torch.bincount(self.category_ids).tolist()}")
         
         # Pre-tokenize all texts
-        print("Tokenizing texts...")
+        print("Tokenizing segment texts...")
         self.tokenized = []
-        for text in tqdm(texts):
-            encoded = tokenizer.encode(
+        for text in tqdm(self.texts):
+            encoded = self.tokenizer.encode(
                 text,
-                max_length=max_length,
+                max_length=self.max_length,
                 padding='max_length',
                 truncation=True,
                 return_tensors='pt'
@@ -57,11 +111,16 @@ class EmbeddingInversionDataset(Dataset):
         return len(self.embeddings)
     
     def __getitem__(self, idx):
-        return {
+        item = {
             'embedding': self.embeddings[idx],
             'token_ids': self.tokenized[idx],
             'text': self.texts[idx]
         }
+        
+        if self.category_ids is not None:
+            item['category_id'] = self.category_ids[idx]
+        
+        return item
 
 
 class InverterTrainer:
@@ -73,7 +132,8 @@ class InverterTrainer:
         tokenizer,
         device: Optional[str] = None,
         learning_rate: float = 1e-4,
-        weight_decay: float = 1e-5
+        weight_decay: float = 1e-5,
+        is_categorical: bool = False
     ):
         """
         Initialize trainer.
@@ -84,9 +144,11 @@ class InverterTrainer:
             device: Device to use
             learning_rate: Learning rate
             weight_decay: Weight decay for regularization
+            is_categorical: Whether the model requires category_ids
         """
         self.model = model
         self.tokenizer = tokenizer
+        self.is_categorical = is_categorical
         
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -140,7 +202,17 @@ class InverterTrainer:
             target_ids = batch['token_ids'].to(self.device)
             
             # Forward pass
-            logits = self.model(embeddings)
+            if self.is_categorical:
+                # Use actual category IDs from dataset
+                if 'category_id' in batch:
+                    category_ids = batch['category_id'].to(self.device)
+                else:
+                    # Fallback to random if not available
+                    batch_size = embeddings.size(0)
+                    category_ids = torch.randint(0, 3, (batch_size,)).to(self.device)
+                logits = self.model(embeddings, category_ids)
+            else:
+                logits = self.model(embeddings)
             
             # Reshape for loss calculation
             batch_size, seq_len, vocab_size = logits.shape
@@ -205,7 +277,17 @@ class InverterTrainer:
                 target_ids = batch['token_ids'].to(self.device)
                 
                 # Forward pass
-                logits = self.model(embeddings)
+                if self.is_categorical:
+                    # Use actual category IDs from dataset
+                    if 'category_id' in batch:
+                        category_ids = batch['category_id'].to(self.device)
+                    else:
+                        # Fallback to random if not available
+                        batch_size = embeddings.size(0)
+                        category_ids = torch.randint(0, 3, (batch_size,)).to(self.device)
+                    logits = self.model(embeddings, category_ids)
+                else:
+                    logits = self.model(embeddings)
                 
                 # Reshape for loss calculation
                 batch_size, seq_len, vocab_size = logits.shape
@@ -300,19 +382,133 @@ class InverterTrainer:
         print("="*50)
 
 
+def train_single_model(
+    model_type: str,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    tokenizer,
+    embedding_dim: int,
+    vocab_size: int,
+    max_length: int,
+    num_epochs: int,
+    learning_rate: float,
+    num_categories: int = None
+) -> Dict:
+    """
+    Train a single model and return results.
+    
+    Args:
+        model_type: Type of model ('mlp', 'lstm', 'attention', 'categorical_lstm')
+        train_loader: Training data loader
+        test_loader: Test data loader
+        tokenizer: Tokenizer
+        embedding_dim: Embedding dimension
+        vocab_size: Vocabulary size
+        max_length: Maximum sequence length
+        num_epochs: Number of epochs
+        learning_rate: Learning rate
+        num_categories: Number of categories (required for categorical_lstm)
+        
+    Returns:
+        Dictionary with training results
+    """
+    print(f"\n{'='*80}")
+    print(f"Training {model_type.upper()} Model")
+    print(f"{'='*80}")
+    
+    # Create model
+    print(f"Creating {model_type} model...")
+    if model_type == 'mlp':
+        model = EmbeddingInverter(
+            embedding_dim=embedding_dim,
+            vocab_size=vocab_size,
+            max_seq_length=max_length
+        )
+    elif model_type == 'lstm':
+        model = LSTMInverter(
+            embedding_dim=embedding_dim,
+            vocab_size=vocab_size,
+            max_seq_length=max_length
+        )
+    elif model_type == 'attention':
+        model = AttentionInverter(
+            embedding_dim=embedding_dim,
+            vocab_size=vocab_size,
+            max_seq_length=max_length
+        )
+    elif model_type == 'categorical_lstm':
+        if num_categories is None:
+            raise ValueError("num_categories must be provided for categorical_lstm model")
+        model = CategoricalLSTMInverter(
+            num_categories=num_categories,
+            embedding_dim=embedding_dim,
+            vocab_size=vocab_size,
+            max_seq_length=max_length
+        )
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
+    # Count parameters
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model parameters: {num_params:,}")
+    
+    # Create trainer
+    trainer = InverterTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        learning_rate=learning_rate,
+        is_categorical=(model_type == 'categorical_lstm')
+    )
+    
+    # Train
+    print(f"\nStarting training for {model_type}...")
+    trainer.train(
+        train_loader=train_loader,
+        val_loader=test_loader,
+        num_epochs=num_epochs,
+        save_dir=f'models/attacker/{model_type}'
+    )
+    
+    # Get final results
+    results = {
+        'model_type': model_type,
+        'num_params': num_params,
+        'best_val_loss': min(trainer.history['val_loss']) if trainer.history['val_loss'] else float('inf'),
+        'best_val_accuracy': max(trainer.history['val_accuracy']) if trainer.history['val_accuracy'] else 0,
+        'history': trainer.history
+    }
+    
+    print(f"\n✓ {model_type.upper()} training complete!")
+    print(f"  Best validation loss: {results['best_val_loss']:.4f}")
+    print(f"  Best validation accuracy: {results['best_val_accuracy']:.4f}")
+    
+    # Clear memory
+    import gc
+    del model, trainer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return results
+
+
 def main():
-    """Main training function."""
+    """Main training function - trains all models."""
     
     # Configuration
     EMBEDDING_PATH_TRAIN = "data/embeddings/train_embeddings.pkl"
     EMBEDDING_PATH_TEST = "data/embeddings/test_embeddings.pkl"
-    MODEL_TYPE = "mlp"  # Options: 'mlp', 'lstm', 'attention'
-    BATCH_SIZE = 16  # Reduced for memory efficiency
-    NUM_EPOCHS = 20
+    MODEL_TYPES = ["mlp", "lstm", "attention", "categorical_lstm"]  # Train all models
+    BATCH_SIZE = 16   # Reduced for memory efficiency
+    NUM_EPOCHS = 100
     LEARNING_RATE = 1e-4
-    MAX_LENGTH = 64  # Reduced for memory efficiency
+    MAX_LENGTH = 64
+    NUM_CATEGORIES = 3  # ["ASSUNTOS", "CLASSE PROCESSUAL", "RAMO DE ATIVIDADE"]
     
-    print("Loading embeddings...")
+    print("="*80)
+    print("EMBEDDING INVERSION ATTACK - TRAINING ALL MODELS")
+    print("="*80)
+    
+    print("\nLoading embeddings...")
     with open(EMBEDDING_PATH_TRAIN, 'rb') as f:
         train_data = pickle.load(f)
     
@@ -331,86 +527,135 @@ def main():
     print(f"Vocabulary size: {vocab_size}")
     print(f"Embedding dimension: {embedding_dim}")
     
-    # Create datasets
-    print("Creating datasets...")
-    train_dataset = EmbeddingInversionDataset(
-        train_data['embeddings'],
-        train_data['texts'],
-        tokenizer,
-        max_length=MAX_LENGTH
-    )
-    
-    test_dataset = EmbeddingInversionDataset(
-        test_data['embeddings'],
-        test_data['texts'],
-        tokenizer,
-        max_length=MAX_LENGTH
-    )
+    # Note: We'll create datasets per model type to handle categorical separately
+    # This is a placeholder - datasets will be created in the training loop
+    datasets_created = False
     
     # Clear memory
     import gc
     gc.collect()
     torch.cuda.empty_cache()
     
-    # Create data loaders (num_workers=0 to reduce memory overhead)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=True
-    )
+    # Train all models
+    all_results = {}
     
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True
-    )
+    for model_type in MODEL_TYPES:
+        try:
+            print(f"\n{'='*80}")
+            print(f"Preparing datasets for {model_type.upper()} model")
+            print(f"{'='*80}")
+            
+            # Create appropriate dataset for model type
+            use_categorical = (model_type == 'categorical_lstm')
+            
+            print(f"Creating {'categorical' if use_categorical else 'standard'} dataset...")
+            train_dataset = EmbeddingInversionDataset(
+                train_data['embeddings'],
+                train_data['texts'],
+                tokenizer,
+                max_length=MAX_LENGTH,
+                use_categories=use_categorical
+            )
+            
+            test_dataset = EmbeddingInversionDataset(
+                test_data['embeddings'],
+                test_data['texts'],
+                tokenizer,
+                max_length=MAX_LENGTH,
+                use_categories=use_categorical
+            )
+            
+            # Create data loaders
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=True
+            )
+            
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=True
+            )
+            
+            # Train model
+            results = train_single_model(
+                model_type=model_type,
+                train_loader=train_loader,
+                test_loader=test_loader,
+                tokenizer=tokenizer,
+                embedding_dim=embedding_dim,
+                vocab_size=vocab_size,
+                max_length=MAX_LENGTH,
+                num_epochs=NUM_EPOCHS,
+                learning_rate=LEARNING_RATE,
+                num_categories=NUM_CATEGORIES if model_type == 'categorical_lstm' else None
+            )
+            all_results[model_type] = results
+            
+            # Clean up
+            del train_dataset, test_dataset, train_loader, test_loader
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+        except Exception as e:
+            print(f"\n✗ Error training {model_type}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
     
-    # Create model
-    print(f"Creating {MODEL_TYPE} model...")
-    if MODEL_TYPE == 'mlp':
-        model = EmbeddingInverter(
-            embedding_dim=embedding_dim,
-            vocab_size=vocab_size,
-            max_seq_length=MAX_LENGTH
-        )
-    elif MODEL_TYPE == 'lstm':
-        model = LSTMInverter(
-            embedding_dim=embedding_dim,
-            vocab_size=vocab_size,
-            max_seq_length=MAX_LENGTH
-        )
-    elif MODEL_TYPE == 'attention':
-        model = AttentionInverter(
-            embedding_dim=embedding_dim,
-            vocab_size=vocab_size,
-            max_seq_length=MAX_LENGTH
-        )
-    else:
-        raise ValueError(f"Unknown model type: {MODEL_TYPE}")
+    # Generate summary report
+    print("\n" + "="*80)
+    print("TRAINING SUMMARY - ALL MODELS")
+    print("="*80)
     
-    # Count parameters
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {num_params:,}")
+    summary_lines = []
+    summary_lines.append("\n| Model | Parameters | Best Val Loss | Best Val Accuracy |")
+    summary_lines.append("|-------|------------|---------------|-------------------|")
     
-    # Create trainer
-    trainer = InverterTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        learning_rate=LEARNING_RATE
-    )
+    for model_type in MODEL_TYPES:
+        if model_type in all_results:
+            results = all_results[model_type]
+            summary_lines.append(
+                f"| {model_type.upper():9} | "
+                f"{results['num_params']:>10,} | "
+                f"{results['best_val_loss']:>13.4f} | "
+                f"{results['best_val_accuracy']:>17.4f} |"
+            )
     
-    # Train
-    print("\nStarting training...")
-    trainer.train(
-        train_loader=train_loader,
-        val_loader=test_loader,
-        num_epochs=NUM_EPOCHS,
-        save_dir=f'models/attacker/{MODEL_TYPE}'
-    )
+    summary = "\n".join(summary_lines)
+    print(summary)
+    
+    # Save summary to file
+    os.makedirs('results', exist_ok=True)
+    with open('results/training_summary.txt', 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("EMBEDDING INVERSION ATTACK - TRAINING SUMMARY\n")
+        f.write("="*80 + "\n")
+        f.write(summary)
+        f.write("\n\n")
+        f.write("="*80 + "\n")
+        f.write("Trained Models:\n")
+        for model_type in MODEL_TYPES:
+            if model_type in all_results:
+                f.write(f"  ✓ {model_type.upper()}: models/attacker/{model_type}/best_inverter.pt\n")
+        f.write("="*80 + "\n")
+    
+    print("\n✓ Training summary saved to results/training_summary.txt")
+    
+    # Save detailed results
+    with open('results/training_results.pkl', 'wb') as f:
+        pickle.dump(all_results, f)
+    
+    print("✓ Detailed results saved to results/training_results.pkl")
+    
+    print("\n" + "="*80)
+    print("ALL TRAINING COMPLETE!")
+    print("="*80)
 
 
 if __name__ == "__main__":
