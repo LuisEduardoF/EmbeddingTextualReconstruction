@@ -123,31 +123,15 @@ Texto Original → BERTimbau → Embedding [CLS] → Modelo Atacante → Texto R
 └── docs/                    # Documentação adicional
 ```
 
-## 🎯 Contribuições Esperadas
-
-1. **Científica**: Evidências empíricas sobre riscos de privacidade em embeddings de modelos jurídicos
-2. **Prática**: Metodologia de auditoria de segurança para sistemas de IA no Judiciário
-3. **Técnica**: Implementação de modelo adversário para inversão de embeddings BERT
-
-## ⚠️ Considerações Éticas
-
-Este trabalho é conduzido com propósitos de pesquisa em segurança, visando:
-- Identificar vulnerabilidades antes de exploração maliciosa
-- Propor medidas de proteção para dados sensíveis
-- Contribuir para o desenvolvimento responsável de IA no sistema judiciário
-
 ## 📄 Licença
 
-[Definir licença apropriada]
+MIT License
 
 ## 👥 Autores
 
-[Adicionar informações dos autores]
+Luís Câmara - Mestrando PPGI UFES
 
 ## 📧 Contato
 
-[Adicionar informações de contato]
-
+luisefcamara@gmail.com | [GitHub](https://github.com/LuisEduardoF) (git) | [Linkedin](https://www.linkedin.com/in/luisefcamara/)
 ---
-
-**Nota**: Este projeto faz parte de trabalho acadêmico na área de Segurança em Sistemas Inteligentes, com foco em privacidade e confidencialidade de dados judiciais.

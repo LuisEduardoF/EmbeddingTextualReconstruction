@@ -389,8 +389,6 @@ class CategoricalLSTMInverter(nn.Module):
         Initialize LSTM hidden state by fusing BERT embedding and Category embedding.
         """
         batch_size = embeddings.size(0)
-        
-        # Get category vectors: [batch_size, category_dim]
         cat_vecs = self.category_embedding(category_ids)
         
         # Concatenate BERT embedding with Category embedding
