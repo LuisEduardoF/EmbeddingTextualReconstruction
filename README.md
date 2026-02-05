@@ -12,13 +12,6 @@ O Judiciário brasileiro tem adotado técnicas de Inteligência Artificial e Pro
 - **Inferência de atributos sensíveis** através de ataques de inversão
 - **Vazamento de informações confidenciais** na fase de inferência
 
-### Contexto de Aplicação
-
-- **Instituição**: Tribunal Regional do Trabalho (TRT)
-- **Domínio**: Predição de ações trabalhistas
-- **Modelo Base**: BERTimbau (BERT em português)
-- **Foco de Segurança**: Confidencialidade dos dados e privacidade em sistemas inteligentes
-
 ## 🎓 Objetivos
 
 ### Objetivo Geral
@@ -37,7 +30,7 @@ Avaliar experimentalmente a segurança dos embeddings gerados pelo modelo BERTim
 
 **Desenvolvimento Experimental / Protótipo**
 
-Este trabalho aproveita o pipeline técnico já desenvolvido em TCC anterior, adicionando uma camada adversária para validação prática dos riscos de segurança.
+Este trabalho aproveita o pipeline técnico já desenvolvido na minha Tese de Mestrado, adicionando uma camada adversária para validação prática dos riscos de segurança.
 
 ### Pipeline de Ataque
 
@@ -78,23 +71,7 @@ Texto Original → BERTimbau → Embedding [CLS] → Modelo Atacante → Texto R
 |------------|------|------------|
 | **Checkpoint 1** | 21/11 | Apresentação do Conceito + Revisão da Literatura |
 | **Checkpoint 2** | 18/12 | Definição da Arquitetura do Modelo Atacante + Resultados Parciais |
-| **Checkpoint 3** | 05/05 | Código Completo + Relatório Final + Resultados |
-
-## 🔐 Tópicos de Segurança Abordados
-
-- **Privacidade em Sistemas Inteligentes**
-- **Vazamentos e Rastreabilidade de Dados**
-- **Confidencialidade na Fase de Inferência**
-- **Ataques de Inversão de Modelo**
-- **Vulnerabilidades em Representações Vetoriais**
-
-## 📚 Conceitos-Chave
-
-- **Embeddings**: Representações vetoriais densas de texto
-- **Token [CLS]**: Token especial do BERT usado para classificação
-- **Inversão de Modelo**: Técnica adversária para recuperar dados de entrada a partir de saídas do modelo
-- **BERTimbau**: Versão do BERT pré-treinada em português brasileiro
-- **Fine-tuning**: Ajuste fino de modelo pré-treinado para tarefa específica
+| **Checkpoint 3** | 05/02 | Código Completo + Relatório Final + Resultados |
 
 ## 🛠️ Tecnologias
 
